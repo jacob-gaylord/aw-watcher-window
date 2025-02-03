@@ -1,5 +1,6 @@
 import Cocoa
 import ScriptingBridge
+import CoreGraphics
 
 @objc protocol ChromeTab {
   @objc optional var URL: String { get }
@@ -303,11 +304,52 @@ class MainThing {
     pollingTimer?.invalidate()
   }
 
-  func windowTitleChanged(
-    _ axObserver: AXObserver,
-    axElement: AXUIElement,
-    notification: CFString
-  ) {
+  func getCurrentSpace() -> Int? {
+    let connection = CGSMainConnectionID()
+    guard let displays = CGSCopyManagedDisplaySpaces(connection) as? [[String: Any]] else {
+        return nil
+    }
+    guard let activeDisplay = CGSCopyActiveMenuBarDisplayIdentifier(connection) as? String else {
+        return nil
+    }
+    
+    var allSpaces: [[String: Any]] = []
+    var activeSpaceId: Any?
+    
+    for display in displays {
+        guard let current = display["Current Space"] as? [String: Any],
+              let spaces = display["Spaces"] as? [[String: Any]],
+              let displayId = display["Display Identifier"] as? String else {
+            continue
+        }
+        
+        if displayId == "Main" || displayId == activeDisplay {
+            activeSpaceId = current["ManagedSpaceID"]
+        }
+        
+        for space in spaces {
+            if space["TileLayoutManager"] == nil {
+                allSpaces.append(space)
+            }
+        }
+    }
+    
+    guard let activeId = activeSpaceId else {
+        return nil
+    }
+    
+    for (index, space) in allSpaces.enumerated() {
+        if let spaceId = space["ManagedSpaceID"] as? Int,
+           let activeIdInt = activeId as? Int,
+           spaceId == activeIdInt {
+            return index + 1
+        }
+    }
+    
+    return nil
+  }
+
+  @objc func windowTitleChanged(_ observer: AXObserver, axElement: AXUIElement, notification: CFString) {
     guard let frontmost = NSWorkspace.shared.frontmostApplication else {
       log("Failed to get frontmost application from window title notification")
       return
@@ -324,8 +366,12 @@ class MainThing {
     var windowTitle: AnyObject?
     AXUIElementCopyAttributeValue(axElement, kAXTitleAttribute as CFString, &windowTitle)
 
-    var data = NetworkMessage(app: frontmost.localizedName!, title: windowTitle as? String ?? "")
-
+    var data = NetworkMessage(
+      app: frontmost.localizedName! + (getCurrentSpace().map { " [space:\($0)]" } ?? ""),
+      title: windowTitle as? String ?? "",
+      url: nil
+    )
+    
     if CHROME_BROWSERS.contains(frontmost.localizedName!) {
       debug("Chrome browser detected, extracting URL and title")
 
@@ -345,7 +391,7 @@ class MainThing {
 
         if let tabTitle = activeTab.title {
           if(tabTitle != "" && data.title != tabTitle) {
-            error("tab title diff: \(tabTitle), window title: \(data.title ?? "")")
+            error("tab title diff: \(tabTitle), window title: \(data.title)")
             data.title = tabTitle
           }
         }
@@ -364,7 +410,7 @@ class MainThing {
       // comment above applies here as well
       if let tabTitle = activeTab.name {
         if tabTitle != "" && data.title != tabTitle {
-          error("tab title diff: \(tabTitle), window title: \(data.title ?? "")")
+          error("tab title diff: \(tabTitle), window title: \(data.title)")
           data.title = tabTitle
         }
       }
@@ -461,3 +507,12 @@ func checkAccess() -> Bool {
   let accessEnabled = AXIsProcessTrustedWithOptions(options as CFDictionary?)
   return accessEnabled
 }
+
+@_silgen_name("CGSMainConnectionID") 
+private func CGSMainConnectionID() -> Int
+
+@_silgen_name("CGSCopyManagedDisplaySpaces")
+private func CGSCopyManagedDisplaySpaces(_ conn: Int) -> CFArray
+
+@_silgen_name("CGSCopyActiveMenuBarDisplayIdentifier") 
+private func CGSCopyActiveMenuBarDisplayIdentifier(_ conn: Int) -> CFString
